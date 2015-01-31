@@ -17,7 +17,8 @@
    limitations under the License.
   -->
 
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd ">
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd ">
   <modelVersion>4.0.0</modelVersion>
 
   <parent>
@@ -40,7 +41,7 @@
           <instructions>
             <Embed-Dependency>
               <!-- OAK-1708 TODO: temporary workaround for embedding code for DocumentNodeStoreService-->
-              commons-dbcp,commons-pool,h2
+              commons-dbcp,commons-pool,h2,elasticsearch
               <!-- OAK-1708 TODO: note these below will only embedded when build with the respective profiles from oak-parent -->
               postgresql,db2,db2-license,mysql-connector-java,ojdbc6
             </Embed-Dependency>
@@ -105,6 +106,7 @@
               org.apache.jackrabbit.oak.query,
               org.apache.jackrabbit.oak.query.fulltext,
               org.apache.jackrabbit.oak.security
+
             </Export-Package>
             <Jaas-ModuleClass>
               org.apache.jackrabbit.oak.spi.security.authentication.GuestLoginModule,
@@ -247,6 +249,12 @@
       <optional>true</optional>
     </dependency>
 
+    <dependency>
+      <groupId>org.elasticsearch</groupId>
+      <artifactId>elasticsearch</artifactId>
+      <version>1.4.2</version>
+    </dependency>
+
     <!--  Optional dependency for jclouds s3 to enable s3 cloud store -->
     <dependency>
       <groupId>org.apache.jclouds.provider</groupId>
@@ -267,7 +275,7 @@
       <version>0.2</version>
       <optional>true</optional>
     </dependency>
-    
+
     <!-- Required for the persistent cache -->
     <dependency>
       <groupId>com.h2database</groupId>
