@@ -7,3 +7,4 @@ oak-run/*.csv
 *.iml
 atlassian-ide-plugin.xml
 .checkstyle
+.m2
