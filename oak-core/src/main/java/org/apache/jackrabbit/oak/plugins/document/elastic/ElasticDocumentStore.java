@@ -3,7 +3,9 @@ package org.apache.jackrabbit.oak.plugins.document.elastic;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.Iterables;
+import com.google.common.util.concurrent.Striped;
 import com.google.common.util.concurrent.UncheckedExecutionException;
+import com.mongodb.BasicDBObject;
 import org.apache.jackrabbit.oak.cache.CacheStats;
 import org.apache.jackrabbit.oak.cache.CacheValue;
 import org.apache.jackrabbit.oak.plugins.document.Collection;
@@ -34,6 +36,7 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
 
 /**
  * A document store that uses ElasticSearch as the backend.
@@ -55,7 +58,7 @@ public class ElasticDocumentStore implements CachingDocumentStore {
 
   private final long maxReplicationLagMillis;
   private final long maxDeltaForModTimeIdxSecs =
-    Long.getLong("oak.elastic.maxDeltaForModTimeIdxSecs", -1);
+      Long.getLong("oak.elastic.maxDeltaForModTimeIdxSecs", -1);
 
   private final Cache<CacheValue, NodeDocument> nodesCache;
   private final CacheStats cacheStats;
@@ -64,6 +67,9 @@ public class ElasticDocumentStore implements CachingDocumentStore {
 
   private long timeSum;
   private Clock clock = Clock.SIMPLE;
+
+  private final Striped<Lock> locks = Striped.lock(128);
+  private final Striped<ReadWriteLock> parentLocks = Striped.readWriteLock(64);
 
   private final static class TreeLock {
 
@@ -99,29 +105,6 @@ public class ElasticDocumentStore implements CachingDocumentStore {
     }
   }
 
-  /**
-   * Acquires a log for the given key. The returned tree lock will also hold
-   * a shared lock on the parent key.
-   *
-   * @param key a key.
-   * @return the acquired lock for the given key.
-   */
-  private TreeLock acquire(String key) {
-    return TreeLock.shared(parentLocks.get(getParentId(key)), locks.get(key));
-  }
-
-  /**
-   * Acquires an exclusive lock on the given parent key. Use this method to
-   * block cache access for child keys of the given parent key.
-   *
-   * @param parentKey the parent key.
-   * @return the acquired lock for the given parent key.
-   */
-  private TreeLock acquireExclusive(String parentKey) {
-    return TreeLock.exclusive(parentLocks.get(parentKey));
-  }
-
-
   public ElasticDocumentStore(Client client, DocumentMK.Builder builder) {
     checkVersion(client);
     this.client = client;
@@ -136,9 +119,9 @@ public class ElasticDocumentStore implements CachingDocumentStore {
     }
 
     cacheStats = new CacheStats(nodesCache, "Document-Documents", builder.getWeigher(),
-      builder.getDocumentCacheSize());
+        builder.getDocumentCacheSize());
     LOG.info("Configuration maxReplicationLagMillis {}, " +
-      "maxDeltaForModTimeIdxSecs {}", maxReplicationLagMillis, maxDeltaForModTimeIdxSecs);
+        "maxDeltaForModTimeIdxSecs {}", maxReplicationLagMillis, maxDeltaForModTimeIdxSecs);
   }
 
   private static void log(String message, Object... args) {
@@ -153,12 +136,12 @@ public class ElasticDocumentStore implements CachingDocumentStore {
 
   private static void checkVersion(Client client) {
     NodesInfoResponse response = client
-      .admin()
-      .cluster()
-      .prepareNodesInfo()
-      .all()
-      .execute()
-      .actionGet();
+        .admin()
+        .cluster()
+        .prepareNodesInfo()
+        .all()
+        .execute()
+        .actionGet();
 
     for (NodeInfo info : response.getNodes()) {
       Version version = info.getVersion();
@@ -167,7 +150,7 @@ public class ElasticDocumentStore implements CachingDocumentStore {
       }
       if (version.minor < 4) {
         String msg = "Elastic Search version 1.4.2 or higher required. " +
-          "Currently connected to a Elastic Search with version: " + version;
+            "Currently connected to a Elastic Search with version: " + version;
         throw new RuntimeException(msg);
       }
     }
@@ -175,6 +158,23 @@ public class ElasticDocumentStore implements CachingDocumentStore {
 
   private static long start() {
     return LOG_TIME ? System.currentTimeMillis() : 0;
+  }
+
+  private TreeLock acquire(String key) {
+    return TreeLock.shared(parentLocks.get(getParentId(key)), locks.get(key));
+  }
+
+  private TreeLock acquireExclusive(String parentKey) {
+    return TreeLock.exclusive(parentLocks.get(parentKey));
+  }
+
+  @Nonnull
+  private static String getParentId(@Nonnull String id) {
+    String parentId = Utils.getParentId(checkNotNull(id));
+    if (parentId == null) {
+      parentId = "";
+    }
+    return parentId;
   }
 
   private void end(String message, long start) {
@@ -196,17 +196,27 @@ public class ElasticDocumentStore implements CachingDocumentStore {
   }
 
   private Cache<CacheValue, NodeDocument> createOffHeapCache(
-    DocumentMK.Builder builder) {
+      DocumentMK.Builder builder) {
     ForwardingListener<CacheValue, NodeDocument> listener = ForwardingListener.newInstance();
 
     Cache<CacheValue, NodeDocument> primaryCache = CacheBuilder.newBuilder()
-      .weigher(builder.getWeigher())
-      .maximumWeight(builder.getDocumentCacheSize())
-      .removalListener(listener)
-      .recordStats()
-      .build();
+        .weigher(builder.getWeigher())
+        .maximumWeight(builder.getDocumentCacheSize())
+        .removalListener(listener)
+        .recordStats()
+        .build();
 
     return new NodeDocOffHeapCache(primaryCache, listener, builder, this);
+  }
+
+  private DocumentReadPreference getReadPreference(int maxCacheAge) {
+    if (maxCacheAge >= 0 && maxCacheAge < maxReplicationLagMillis) {
+      return DocumentReadPreference.PRIMARY;
+    } else if (maxCacheAge == Integer.MAX_VALUE) {
+      return DocumentReadPreference.PREFER_SECONDARY;
+    } else {
+      return DocumentReadPreference.PREFER_SECONDARY_IF_OLD_ENOUGH;
+    }
   }
 
   private <T extends Document> String getElasticReadPreference(final Collection<T> collection,
@@ -241,18 +251,18 @@ public class ElasticDocumentStore implements CachingDocumentStore {
 
   private String getConfiguredReadPreference() {
     NodesInfoResponse response = client
-      .admin()
-      .cluster()
-      .prepareNodesInfo()
-      .all()
-      .execute()
-      .actionGet();
+        .admin()
+        .cluster()
+        .prepareNodesInfo()
+        .all()
+        .execute()
+        .actionGet();
 
     NodeInfo info = Iterables.getLast(
-      Arrays.asList(response.getNodes()));
+        Arrays.asList(response.getNodes()));
 
     return Preference.ONLY_NODE.toString().concat(
-      ":".concat(info.getNode().getId()));
+        ":".concat(info.getNode().getId()));
   }
 
   @Override
@@ -277,7 +287,7 @@ public class ElasticDocumentStore implements CachingDocumentStore {
                                       final int maxCacheAge) {
     if (collection != Collection.NODES) {
       return findUncachedWithRetry(collection, key,
-        DocumentReadPreference.PRIMARY, 2);
+          DocumentReadPreference.PRIMARY, 2);
     }
 
     CacheValue cacheKey = new StringValue(key);
@@ -287,7 +297,7 @@ public class ElasticDocumentStore implements CachingDocumentStore {
       doc = nodesCache.getIfPresent(cacheKey);
       if (doc != null) {
         if (preferCached ||
-          getTime() - doc.getCreated() < maxCacheAge) {
+            getTime() - doc.getCreated() < maxCacheAge) {
           if (doc == NodeDocument.NULL) {
             return null;
           }
@@ -307,8 +317,8 @@ public class ElasticDocumentStore implements CachingDocumentStore {
             @Override
             public NodeDocument call() throws Exception {
               NodeDocument doc = (NodeDocument) findUncachedWithRetry(
-                collection, key,
-                getReadPreference(maxCacheAge), 2);
+                  collection, key,
+                  getReadPreference(maxCacheAge), 2);
               if (doc == null) {
                 doc = NodeDocument.NULL;
               }
@@ -321,7 +331,6 @@ public class ElasticDocumentStore implements CachingDocumentStore {
           if (getTime() - doc.getCreated() < maxCacheAge) {
             break;
           }
-          // too old: invalidate, try again
           invalidateCache(collection, key);
         }
       } finally {
@@ -338,15 +347,13 @@ public class ElasticDocumentStore implements CachingDocumentStore {
       t = e.getCause();
     }
     throw new DocumentStoreException("Failed to load document with " + key, t);
-
-    return null;
   }
 
   @CheckForNull
   private <T extends Document> T findUncachedWithRetry(
-    Collection<T> collection, String key,
-    DocumentReadPreference docReadPref,
-    int retries) {
+      Collection<T> collection, String key,
+      DocumentReadPreference docReadPref,
+      int retries) {
     checkArgument(retries >= 0, "retries must not be negative");
     int numAttempts = retries + 1;
     Exception ex = null;
@@ -381,18 +388,18 @@ public class ElasticDocumentStore implements CachingDocumentStore {
       }
 
       GetResponse response = new GetRequestBuilder(client, collection.toString())
-        .setPreference(readPreference)
-        .setId(key)
-        .execute()
-        .actionGet();
-
-      if (response == null
-        && Preference.parse(readPreference) == Preference.ONLY_NODE) {
-        response = new GetRequestBuilder(client, collection.toString())
-          .setPreference(Preference.PRIMARY.toString())
+          .setPreference(readPreference)
           .setId(key)
           .execute()
           .actionGet();
+
+      if (response == null
+          && Preference.parse(readPreference) == Preference.ONLY_NODE) {
+        response = new GetRequestBuilder(client, collection.toString())
+            .setPreference(Preference.PRIMARY.toString())
+            .setId(key)
+            .execute()
+            .actionGet();
       }
       if (response == null) {
         return null;
@@ -437,12 +444,14 @@ public class ElasticDocumentStore implements CachingDocumentStore {
   @Nonnull
   @Override
   public <T extends Document> List<T> query(Collection<T> collection, String fromKey, String toKey, int limit) {
-    return null;
+    return query(collection, fromKey, toKey, null, 0, limit);
   }
 
   @Nonnull
   @Override
   public <T extends Document> List<T> query(Collection<T> collection, String fromKey, String toKey, String indexedProperty, long startValue, int limit) {
+    log("query", fromKey, toKey, indexedProperty, startValue, limit);
+
     return null;
   }
 
