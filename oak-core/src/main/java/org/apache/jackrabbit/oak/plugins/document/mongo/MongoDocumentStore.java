@@ -493,7 +493,7 @@ public class MongoDocumentStore implements CachingDocumentStore {
         try {
             DBCursor cursor = dbCollection.find(query).sort(BY_ID_ASC).hint(hint);
             ReadPreference readPreference =
-                    getMongoReadPreference(collection, parentId, getDefaultReadPreference(collection));
+                getMongoReadPreference(collection, parentId, getDefaultReadPreference(collection));
 
             if(readPreference.isSlaveOk()){
                 LOG.trace("Routing call to secondary for fetching children from [{}] to [{}]", fromKey, toKey);

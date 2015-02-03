@@ -5,7 +5,6 @@ import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.Iterables;
 import com.google.common.util.concurrent.Striped;
 import com.google.common.util.concurrent.UncheckedExecutionException;
-import com.mongodb.BasicDBObject;
 import org.apache.jackrabbit.oak.cache.CacheStats;
 import org.apache.jackrabbit.oak.cache.CacheValue;
 import org.apache.jackrabbit.oak.plugins.document.Collection;
@@ -13,22 +12,36 @@ import org.apache.jackrabbit.oak.plugins.document.*;
 import org.apache.jackrabbit.oak.plugins.document.cache.CachingDocumentStore;
 import org.apache.jackrabbit.oak.plugins.document.cache.ForwardingListener;
 import org.apache.jackrabbit.oak.plugins.document.cache.NodeDocOffHeapCache;
+import org.apache.jackrabbit.oak.plugins.document.mongo.RevisionEntry;
 import org.apache.jackrabbit.oak.plugins.document.util.StringValue;
 import org.apache.jackrabbit.oak.plugins.document.util.Utils;
 import org.apache.jackrabbit.oak.stats.Clock;
 import org.elasticsearch.Version;
 import org.elasticsearch.action.admin.cluster.node.info.NodeInfo;
 import org.elasticsearch.action.admin.cluster.node.info.NodesInfoResponse;
+import org.elasticsearch.action.bulk.BulkRequestBuilder;
+import org.elasticsearch.action.bulk.BulkResponse;
 import org.elasticsearch.action.get.GetRequestBuilder;
 import org.elasticsearch.action.get.GetResponse;
+import org.elasticsearch.action.index.IndexRequest;
+import org.elasticsearch.action.search.SearchResponse;
+import org.elasticsearch.action.search.SearchType;
+import org.elasticsearch.action.update.UpdateRequest;
+import org.elasticsearch.action.update.UpdateResponse;
 import org.elasticsearch.client.Client;
 import org.elasticsearch.cluster.routing.operation.plain.Preference;
+import org.elasticsearch.common.xcontent.XContentBuilder;
+import org.elasticsearch.index.query.QueryBuilders;
+import org.elasticsearch.index.query.RangeFilterBuilder;
+import org.elasticsearch.indices.IndexMissingException;
+import org.elasticsearch.search.SearchHit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
@@ -37,11 +50,14 @@ import java.util.concurrent.locks.ReadWriteLock;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
+import static org.elasticsearch.common.xcontent.XContentFactory.jsonBuilder;
 
 /**
  * A document store that uses ElasticSearch as the backend.
  */
 public class ElasticDocumentStore implements CachingDocumentStore {
+
+  private static final String ID = "id";
 
   private static final Logger LOG = LoggerFactory.getLogger(ElasticDocumentStore.class);
 
@@ -122,6 +138,24 @@ public class ElasticDocumentStore implements CachingDocumentStore {
         builder.getDocumentCacheSize());
     LOG.info("Configuration maxReplicationLagMillis {}, " +
         "maxDeltaForModTimeIdxSecs {}", maxReplicationLagMillis, maxDeltaForModTimeIdxSecs);
+  }
+
+  private static <T extends Document> String getIndexName(Collection<T> collection) {
+    StringBuilder builder = new StringBuilder();
+    for (char c : collection.toString().toCharArray()) {
+      if (Character.isUpperCase(c)) {
+        builder.append('_');
+        builder.append(Character.toLowerCase(c));
+      } else {
+        builder.append(c);
+      }
+    }
+    return builder.toString();
+  }
+
+  private static <T extends Document> String getTypeName(Collection<T> collection) {
+    String index = getIndexName(collection);
+    return index.substring(0, index.length() - 1).toLowerCase();
   }
 
   private static void log(String message, Object... args) {
@@ -224,17 +258,17 @@ public class ElasticDocumentStore implements CachingDocumentStore {
                                                                final DocumentReadPreference preference) {
     switch (preference) {
       case PRIMARY:
-        return Preference.PRIMARY.toString();
+        return Preference.PRIMARY.type();
       case PREFER_PRIMARY:
-        return Preference.PRIMARY_FIRST.toString();
+        return Preference.PRIMARY_FIRST.type();
       case PREFER_SECONDARY:
         return getConfiguredReadPreference();
       case PREFER_SECONDARY_IF_OLD_ENOUGH:
         if (collection != Collection.NODES) {
-          return Preference.PRIMARY.toString();
+          return Preference.PRIMARY.type();
         }
 
-        String readPreference = Preference.PRIMARY.toString();
+        String readPreference = Preference.PRIMARY.type();
         if (parentId != null) {
           long replicationSafeLimit = getTime() - maxReplicationLagMillis;
           NodeDocument cachedDoc = (NodeDocument) getIfCached(collection, parentId);
@@ -261,7 +295,7 @@ public class ElasticDocumentStore implements CachingDocumentStore {
     NodeInfo info = Iterables.getLast(
         Arrays.asList(response.getNodes()));
 
-    return Preference.ONLY_NODE.toString().concat(
+    return Preference.ONLY_NODE.type().concat(
         ":".concat(info.getNode().getId()));
   }
 
@@ -272,13 +306,12 @@ public class ElasticDocumentStore implements CachingDocumentStore {
 
   @Override
   public <T extends Document> T find(Collection<T> collection, String key) {
-    //return find(collection, key, true, -1);
-    return null;
+    return find(collection, key, true, -1);
   }
 
   @Override
   public <T extends Document> T find(Collection<T> collection, String key, int maxCacheAge) {
-    return null;
+    return find(collection, key, false, maxCacheAge);
   }
 
   private <T extends Document> T find(final Collection<T> collection,
@@ -363,12 +396,13 @@ public class ElasticDocumentStore implements CachingDocumentStore {
       }
       try {
         return findUncached(collection, key, docReadPref);
-      } catch (Exception e) {
+      } catch (IndexMissingException e) {
         ex = e;
       }
     }
-    if (ex != null) {
-      throw new IllegalStateException(ex);
+
+    if (ex instanceof IndexMissingException) {
+      return null;
     } else {
       throw new IllegalStateException();
     }
@@ -387,7 +421,7 @@ public class ElasticDocumentStore implements CachingDocumentStore {
         LOG.trace("Routing call to secondary for fetching [{}]", key);
       }
 
-      GetResponse response = new GetRequestBuilder(client, collection.toString())
+      GetResponse response = new GetRequestBuilder(client, getIndexName(collection))
           .setPreference(readPreference)
           .setId(key)
           .execute()
@@ -395,7 +429,7 @@ public class ElasticDocumentStore implements CachingDocumentStore {
 
       if (response == null
           && Preference.parse(readPreference) == Preference.ONLY_NODE) {
-        response = new GetRequestBuilder(client, collection.toString())
+        response = new GetRequestBuilder(client, getIndexName(collection))
             .setPreference(Preference.PRIMARY.toString())
             .setId(key)
             .execute()
@@ -404,7 +438,7 @@ public class ElasticDocumentStore implements CachingDocumentStore {
       if (response == null) {
         return null;
       }
-      T doc = convertFromDBObject(collection, response);
+      T doc = convertFromMap(collection, response.getSourceAsMap());
       if (doc != null) {
         doc.seal();
       }
@@ -415,12 +449,11 @@ public class ElasticDocumentStore implements CachingDocumentStore {
   }
 
   @CheckForNull
-  protected <T extends Document> T convertFromDBObject(@Nonnull final Collection<T> collection,
-                                                       @Nullable final GetResponse response) {
+  protected <T extends Document> T convertFromMap(@Nonnull final Collection<T> collection,
+                                                  @Nullable final Map<String, Object> responseMap) {
     T copy = null;
-    if (response != null) {
+    if (responseMap != null) {
       copy = collection.newDocument(this);
-      Map<String, Object> responseMap = response.getSourceAsMap();
       for (String key : responseMap.keySet()) {
         Object o = responseMap.get(key);
         if (o instanceof String) {
@@ -441,6 +474,116 @@ public class ElasticDocumentStore implements CachingDocumentStore {
     return copy;
   }
 
+  @CheckForNull
+  private <T extends Document> T findAndModify(Collection<T> collection,
+                                               UpdateOp updateOp,
+                                               boolean upsert,
+                                               boolean checkConditions) {
+    updateOp = updateOp.copy();
+    XContentBuilder update = createUpdate(updateOp);
+
+    String id = updateOp.getId();
+    TreeLock lock = acquire(id);
+    long start = start();
+    try {
+      // get modCount of cached document
+      Number modCount = null;
+      T cachedDoc = null;
+      if (collection == Collection.NODES) {
+        @SuppressWarnings("unchecked")
+        T doc = (T) nodesCache.getIfPresent(new StringValue(updateOp.getId()));
+        cachedDoc = doc;
+        if (cachedDoc != null) {
+          modCount = cachedDoc.getModCount();
+        }
+      }
+
+      UpdateRequest updateRequest = new UpdateRequest();
+      updateRequest.index(getIndexName(collection));
+      updateRequest.type(getTypeName(collection));
+      updateRequest.doc(update);
+
+      // perform a conditional update with limited result
+      // if we have a matching modCount
+      if (modCount != null) {
+        updateRequest.id("1");
+        UpdateResponse response = client.update(updateRequest).get();
+
+        if (response != null) {
+          // success, update cached document
+          // applyToCache(collection, cachedDoc, updateOp);
+          // return previously cached document
+          return cachedDoc;
+        }
+      }
+
+      // conditional update failed or not possible
+      // perform operation and get complete document
+      if (upsert) {
+        IndexRequest indexRequest = new IndexRequest(getIndexName(collection), getTypeName(collection), id)
+            .source(update);
+        updateRequest.upsert(indexRequest);
+        updateRequest.getFromContext(id);
+      }
+      updateRequest.id(id);
+      UpdateResponse response = client.update(updateRequest).get();
+      if (checkConditions && response == null) {
+        return null;
+      }
+      T oldDoc = find(collection, id);
+      //applyToCache(collection, oldDoc, updateOp);
+      if (oldDoc != null) {
+        oldDoc.seal();
+      }
+      return oldDoc;
+    } catch (Exception e) {
+      throw DocumentStoreException.convert(e);
+    } finally {
+      lock.unlock();
+      end("findAndModify", start);
+    }
+  }
+
+  @Nonnull
+  private static XContentBuilder createUpdate(UpdateOp updateOp) {
+    try {
+      XContentBuilder update = jsonBuilder().startObject();
+      updateOp.increment(Document.MOD_COUNT, 1);
+
+      for (Map.Entry<UpdateOp.Key, UpdateOp.Operation> entry : updateOp.getChanges().entrySet()) {
+        UpdateOp.Key k = entry.getKey();
+        if (k.getName().equals(Document.ID)) {
+          update.field(ID, updateOp.getId());
+          continue;
+        }
+        UpdateOp.Operation op = entry.getValue();
+        switch (op.type) {
+          case SET:
+          case SET_MAP_ENTRY: {
+            update.field(k.toString(), op.value);
+            break;
+          }
+          case MAX: {
+            update.field(k.toString(), op.value);
+            break;
+          }
+          case INCREMENT: {
+            update.field(k.toString(), op.value);
+            break;
+          }
+          case REMOVE_MAP_ENTRY: {
+            update.field(k.toString(), "1");
+            break;
+          }
+        }
+      }
+
+      return update.endObject();
+    } catch (IOException e) {
+      throw new RuntimeException(e);
+    }
+  }
+
   @Nonnull
   @Override
   public <T extends Document> List<T> query(Collection<T> collection, String fromKey, String toKey, int limit) {
@@ -452,7 +595,55 @@ public class ElasticDocumentStore implements CachingDocumentStore {
   public <T extends Document> List<T> query(Collection<T> collection, String fromKey, String toKey, String indexedProperty, long startValue, int limit) {
     log("query", fromKey, toKey, indexedProperty, startValue, limit);
 
-    return null;
+    SearchHit[] hits = new SearchHit[]{};
+    try {
+      SearchResponse response = client.prepareSearch(getIndexName(collection))
+          .setSearchType(SearchType.DEFAULT)
+          .setQuery(QueryBuilders.filteredQuery(
+              QueryBuilders.matchAllQuery(),
+              new RangeFilterBuilder(ID).gte(fromKey).lte(toKey)
+          ))
+          .execute()
+          .actionGet();
+      hits = response.getHits().getHits();
+    } catch (IndexMissingException e) {
+    }
+
+    String parentId = Utils.getParentIdFromLowerLimit(fromKey);
+    TreeLock lock = acquireExclusive(parentId != null ? parentId : "");
+    long start = start();
+    try {
+      List<T> list = new ArrayList<T>();
+      for (int i = 0; i < limit && i < hits.length; i++) {
+
+        T doc = convertFromMap(collection, hits[i].sourceAsMap());
+        if (collection == Collection.NODES && doc != null) {
+          doc.seal();
+          String id = doc.getId();
+          CacheValue cacheKey = new StringValue(id);
+          NodeDocument cached = nodesCache.getIfPresent(cacheKey);
+          if (cached != null && cached != NodeDocument.NULL) {
+            // check mod count
+            Number cachedModCount = cached.getModCount();
+            Number modCount = doc.getModCount();
+            if (cachedModCount == null || modCount == null) {
+              throw new IllegalStateException(
+                  "Missing " + Document.MOD_COUNT);
+            }
+            if (modCount.longValue() > cachedModCount.longValue()) {
+              nodesCache.put(cacheKey, (NodeDocument) doc);
+            }
+          } else {
+            nodesCache.put(cacheKey, (NodeDocument) doc);
+          }
+        }
+        list.add(doc);
+      }
+      return list;
+    } finally {
+      lock.unlock();
+      end("query", start);
+    }
   }
 
   @Override
@@ -467,7 +658,90 @@ public class ElasticDocumentStore implements CachingDocumentStore {
 
   @Override
   public <T extends Document> boolean create(Collection<T> collection, List<UpdateOp> updateOps) {
-    return false;
+    log("create", updateOps);
+    List<T> docs = new ArrayList<T>();
+    BulkRequestBuilder bulkRequest = client.prepareBulk();
+    XContentBuilder[] inserts = new XContentBuilder[updateOps.size()];
+
+    String id = null;
+    for (int i = 0; i < updateOps.size(); i++) {
+      try {
+        inserts[i] = jsonBuilder().startObject();
+
+        UpdateOp update = updateOps.get(i);
+        T target = collection.newDocument(this);
+        UpdateUtils.applyChanges(target, update, comparator);
+        docs.add(target);
+
+        for (Map.Entry<UpdateOp.Key, UpdateOp.Operation> entry : update.getChanges().entrySet()) {
+          UpdateOp.Key k = entry.getKey();
+          UpdateOp.Operation op = entry.getValue();
+
+          if (k.toString().equals(Document.ID)) {
+            id = op.value.toString();
+            inserts[i].field(ID, id);
+          }
+
+          switch (op.type) {
+            case SET:
+            case MAX:
+            case INCREMENT: {
+              inserts[i].field(k.toString(), op.value);
+              break;
+            }
+            case SET_MAP_ENTRY: {
+              Revision r = k.getRevision();
+              if (r == null) {
+                throw new IllegalStateException(
+                    "SET_MAP_ENTRY must not have null revision");
+              }
+              inserts[i].field(k.getName(), new RevisionEntry(r, op.value));
+              break;
+            }
+            case REMOVE_MAP_ENTRY:
+              // nothing to do for new entries
+              break;
+            case CONTAINS_MAP_ENTRY:
+              // no effect
+              break;
+          }
+        }
+
+        inserts[i].field(Document.MOD_COUNT, 1L);
+        target.put(Document.MOD_COUNT, 1L);
+
+        inserts[i].endObject();
+      } catch (IOException e) {
+        throw new RuntimeException(e);
+      }
+
+      bulkRequest.add(client.prepareIndex(getIndexName(collection), getTypeName(collection), id)
+          .setSource(inserts[i]));
+    }
+    long start = start();
+    try {
+      try {
+        BulkResponse bulkResponse = bulkRequest.execute().actionGet();
+        if (bulkResponse.hasFailures()) {
+          return false;
+        }
+        if (collection == Collection.NODES) {
+          for (T doc : docs) {
+            TreeLock lock = acquire(doc.getId());
+            try {
+              //addToCache((NodeDocument) doc);
+            } finally {
+              lock.unlock();
+            }
+          }
+        }
+        return true;
+      } catch (Exception e) {
+        return false;
+      }
+    } finally {
+      end("create", start);
+    }
   }
 
   @Override
@@ -477,12 +751,18 @@ public class ElasticDocumentStore implements CachingDocumentStore {
 
   @Override
   public <T extends Document> T createOrUpdate(Collection<T> collection, UpdateOp update) {
-    return null;
+    log("createOrUpdate", update);
+    T doc = findAndModify(collection, update, true, false);
+    log("createOrUpdate returns ", doc);
+    return doc;
   }
 
   @Override
   public <T extends Document> T findAndUpdate(Collection<T> collection, UpdateOp update) {
-    return null;
+    log("findAndUpdate", update);
+    T doc = findAndModify(collection, update, false, true);
+    log("findAndUpdate returns ", doc);
+    return doc;
   }
 
   @Override
