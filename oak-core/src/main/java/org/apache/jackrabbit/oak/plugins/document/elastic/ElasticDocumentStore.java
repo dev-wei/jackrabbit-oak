@@ -1,5 +1,6 @@
 package org.apache.jackrabbit.oak.plugins.document.elastic;
 
+import com.google.common.base.Objects;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.Iterables;
@@ -41,6 +42,7 @@ import org.slf4j.LoggerFactory;
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+import java.io.Closeable;
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.Callable;
@@ -243,6 +245,84 @@ public class ElasticDocumentStore implements CachingDocumentStore {
     return new NodeDocOffHeapCache(primaryCache, listener, builder, this);
   }
 
+  private <T extends Document> void applyToCache(@Nonnull Collection<T> collection,
+                                                 @Nullable T oldDoc,
+                                                 @Nonnull UpdateOp updateOp) {
+    // cache the new document
+    if (collection == Collection.NODES) {
+      CacheValue key = new StringValue(updateOp.getId());
+      NodeDocument newDoc = (NodeDocument) collection.newDocument(this);
+      if (oldDoc != null) {
+        // we can only update the cache based on the oldDoc if we
+        // still have the oldDoc in the cache, otherwise we may
+        // update the cache with an outdated document
+        NodeDocument cached = nodesCache.getIfPresent(key);
+        if (cached == null) {
+          // cannot use oldDoc to update cache
+          return;
+        }
+        oldDoc.deepCopy(newDoc);
+      }
+      UpdateUtils.applyChanges(newDoc, updateOp, comparator);
+      newDoc.seal();
+
+      NodeDocument cached = addToCache(newDoc);
+      if (cached == newDoc) {
+        // successful
+        return;
+      }
+      if (oldDoc == null) {
+        // this is an insert and some other thread was quicker
+        // loading it into the cache -> return now
+        return;
+      }
+      // this is an update (oldDoc != null)
+      if (Objects.equal(cached.getModCount(), oldDoc.getModCount())) {
+        nodesCache.put(key, newDoc);
+      } else {
+        // the cache entry was modified by some other thread in
+        // the meantime. the updated cache entry may or may not
+        // include this update. we cannot just apply our update
+        // on top of the cached entry.
+        // therefore we must invalidate the cache entry
+        nodesCache.invalidate(key);
+      }
+    }
+  }
+
+  @Nonnull
+  private NodeDocument addToCache(@Nonnull final NodeDocument doc) {
+    if (doc == NodeDocument.NULL) {
+      throw new IllegalArgumentException("doc must not be NULL document");
+    }
+    doc.seal();
+    // make sure we only cache the document if it wasn't
+    // changed and cached by some other thread in the
+    // meantime. That is, use get() with a Callable,
+    // which is only used when the document isn't there
+    try {
+      CacheValue key = new StringValue(doc.getId());
+      for (; ; ) {
+        NodeDocument cached = nodesCache.get(key,
+            new Callable<NodeDocument>() {
+              @Override
+              public NodeDocument call() {
+                return doc;
+              }
+            });
+        if (cached != NodeDocument.NULL) {
+          return cached;
+        } else {
+          nodesCache.invalidate(key);
+        }
+      }
+    } catch (ExecutionException e) {
+      // will never happen because call() just returns
+      // the already available doc
+      throw new IllegalStateException(e);
+    }
+  }
+
   private DocumentReadPreference getReadPreference(int maxCacheAge) {
     if (maxCacheAge >= 0 && maxCacheAge < maxReplicationLagMillis) {
       return DocumentReadPreference.PRIMARY;
@@ -397,15 +477,16 @@ public class ElasticDocumentStore implements CachingDocumentStore {
       try {
         return findUncached(collection, key, docReadPref);
       } catch (IndexMissingException e) {
+        return null;
+      } catch (Exception e) {
         ex = e;
       }
     }
 
-    if (ex instanceof IndexMissingException) {
-      return null;
-    } else {
+    if (ex != null) {
       throw new IllegalStateException();
     }
+    return null;
   }
 
   @CheckForNull
@@ -511,7 +592,7 @@ public class ElasticDocumentStore implements CachingDocumentStore {
 
         if (response != null) {
           // success, update cached document
-          // applyToCache(collection, cachedDoc, updateOp);
+          applyToCache(collection, cachedDoc, updateOp);
           // return previously cached document
           return cachedDoc;
         }
@@ -531,7 +612,7 @@ public class ElasticDocumentStore implements CachingDocumentStore {
         return null;
       }
       T oldDoc = find(collection, id);
-      //applyToCache(collection, oldDoc, updateOp);
+      applyToCache(collection, oldDoc, updateOp);
       if (oldDoc != null) {
         oldDoc.seal();
       }
@@ -729,7 +810,7 @@ public class ElasticDocumentStore implements CachingDocumentStore {
           for (T doc : docs) {
             TreeLock lock = acquire(doc.getId());
             try {
-              //addToCache((NodeDocument) doc);
+              addToCache((NodeDocument) doc);
             } finally {
               lock.unlock();
             }
@@ -772,12 +853,30 @@ public class ElasticDocumentStore implements CachingDocumentStore {
 
   @Override
   public <T extends Document> void invalidateCache(Collection<T> collection, String key) {
-
+    if (collection == Collection.NODES) {
+      TreeLock lock = acquire(key);
+      try {
+        nodesCache.invalidate(new StringValue(key));
+      } finally {
+        lock.unlock();
+      }
+    }
   }
 
   @Override
   public void dispose() {
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("ElasticSearch time: " + timeSum);
+    }
+    client.close();
 
+    if (nodesCache instanceof Closeable) {
+      try {
+        ((Closeable) nodesCache).close();
+      } catch (IOException e) {
+        LOG.warn("Error occurred while closing Off Heap Cache", e);
+      }
+    }
   }
 
   @Override
