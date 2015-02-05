@@ -18,6 +18,13 @@ package org.apache.jackrabbit.oak.plugins.index.lucene;
 
 import com.google.common.collect.Iterables;
 import com.google.common.io.ByteStreams;
+import com.google.common.primitives.Ints;
+import org.apache.jackrabbit.oak.api.Blob;
+import org.apache.jackrabbit.oak.api.PropertyState;
+import org.apache.jackrabbit.oak.api.Type;
+import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
+import org.apache.lucene.store.*;
+
 import java.io.ByteArrayInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -25,23 +32,7 @@ import java.io.InputStream;
 import java.util.Collection;
 import java.util.List;
 
-import com.google.common.primitives.Ints;
-import org.apache.jackrabbit.oak.api.Blob;
-import org.apache.jackrabbit.oak.api.PropertyState;
-import org.apache.jackrabbit.oak.api.Type;
-import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
-import org.apache.lucene.store.Directory;
-import org.apache.lucene.store.IOContext;
-import org.apache.lucene.store.IndexInput;
-import org.apache.lucene.store.IndexOutput;
-import org.apache.lucene.store.Lock;
-import org.apache.lucene.store.LockFactory;
-import org.apache.lucene.store.NoLockFactory;
-
-import static com.google.common.base.Preconditions.checkElementIndex;
-import static com.google.common.base.Preconditions.checkNotNull;
-import static com.google.common.base.Preconditions.checkPositionIndexes;
-import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.base.Preconditions.*;
 import static com.google.common.collect.Lists.newArrayList;
 import static org.apache.jackrabbit.JcrConstants.JCR_DATA;
 import static org.apache.jackrabbit.JcrConstants.JCR_LASTMODIFIED;
@@ -187,7 +178,7 @@ class OakDirectory extends Directory {
                 this.data = newArrayList();
             }
 
-            this.length = (long)data.size() * blobSize;
+            this.length = (long) data.size() * blobSize;
             if (!data.isEmpty()) {
                 Blob last = data.get(data.size() - 1);
                 this.length -= blobSize - last.length();
@@ -254,7 +245,7 @@ class OakDirectory extends Directory {
 
             if (len < 0 || position + len > length) {
                 String msg = String.format("Invalid byte range request [%s] : position : %d, length : " +
-                                "%d, len : %d", name, position, length, len);
+                        "%d, len : %d", name, position, length, len);
                 throw new IOException(msg);
             }
 
@@ -303,8 +294,8 @@ class OakDirectory extends Directory {
             }
         }
 
-        private static int determineBlobSize(NodeBuilder file){
-            if (file.hasProperty(PROP_BLOB_SIZE)){
+        private static int determineBlobSize(NodeBuilder file) {
+            if (file.hasProperty(PROP_BLOB_SIZE)) {
                 return Ints.checkedCast(file.getProperty(PROP_BLOB_SIZE).getValue(Type.LONG));
             }
             return DEFAULT_BLOB_SIZE;
@@ -338,6 +329,11 @@ class OakDirectory extends Directory {
         private OakIndexInput(OakIndexInput that) {
             super(that.toString());
             this.file = new OakIndexFile(that.file);
+        }
+
+        @Override
+        public IndexInput slice(String sliceDescription, long offset, long length) throws IOException {
+            return null;
         }
 
         @Override
@@ -398,6 +394,10 @@ class OakDirectory extends Directory {
         }
 
         @Override
+        public long getChecksum() throws IOException {
+            return 0;
+        }
+
         public void seek(long pos) throws IOException {
             file.seek(pos);
         }
@@ -410,7 +410,7 @@ class OakDirectory extends Directory {
 
         @Override
         public void writeByte(byte b) throws IOException {
-            writeBytes(new byte[] { b }, 0, 1);
+            writeBytes(new byte[]{b}, 0, 1);
         }
 
         @Override

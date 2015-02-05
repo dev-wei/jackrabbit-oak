@@ -20,9 +20,11 @@ import org.elasticsearch.node.Node;
 import org.elasticsearch.node.NodeBuilder;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Test;
 import org.osgi.service.repository.Repository;
 
+@Ignore
 public class ElasticDocumentStoreTest {
   private Client client;
 
