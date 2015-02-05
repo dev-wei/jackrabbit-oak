@@ -50,6 +50,7 @@ import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstant
 import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.INDEX_RULES;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.PROP_NAME;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.PROP_NODE;
+import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.TIKA;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.util.LuceneIndexHelper.newLuceneIndexDefinition;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.util.LuceneIndexHelper.newLucenePropertyIndexDefinition;
 import static org.apache.jackrabbit.oak.plugins.memory.EmptyNodeState.EMPTY_NODE;
@@ -478,6 +479,9 @@ public class IndexDefinitionTest {
     public void customAnalyzer() throws Exception{
         NodeBuilder defnb = newLuceneIndexDefinition(builder.child(INDEX_DEFINITIONS_NAME),
                 "lucene", of(TYPENAME_STRING));
+
+        //Set this to -1 to avoid wrapping by LimitAnalyzer
+        defnb.setProperty(LuceneIndexConstants.MAX_FIELD_LENGTH, -1);
         defnb.child(ANALYZERS).child(ANL_DEFAULT)
                 .child(LuceneIndexConstants.ANL_TOKENIZER)
                 .setProperty(LuceneIndexConstants.ANL_NAME, "whitespace");
@@ -492,11 +496,27 @@ public class IndexDefinitionTest {
         IndexDefinition defn = new IndexDefinition(root, defnb.getNodeState());
         assertFalse(defn.hasCustomTikaConfig());
 
-        defnb.child(LuceneIndexConstants.TIKA_CONFIG)
+        defnb.child(LuceneIndexConstants.TIKA)
+                .child(LuceneIndexConstants.TIKA_CONFIG)
                 .child(JcrConstants.JCR_CONTENT)
                 .setProperty(JcrConstants.JCR_DATA, "hello".getBytes());
         defn = new IndexDefinition(root, defnb.getNodeState());
         assertTrue(defn.hasCustomTikaConfig());
+    }
+
+    @Test
+    public void maxExtractLength() throws Exception{
+        NodeBuilder defnb = newLuceneIndexDefinition(builder.child(INDEX_DEFINITIONS_NAME),
+                "lucene", of(TYPENAME_STRING));
+        IndexDefinition defn = new IndexDefinition(root, defnb.getNodeState());
+        assertEquals(-IndexDefinition.DEFAULT_MAX_EXTRACT_LENGTH * IndexDefinition.DEFAULT_MAX_FIELD_LENGTH,
+                defn.getMaxExtractLength());
+
+
+        defnb.child(TIKA).setProperty(LuceneIndexConstants.TIKA_MAX_EXTRACT_LENGTH, 1000);
+
+        defn = new IndexDefinition(root, defnb.getNodeState());
+        assertEquals(1000, defn.getMaxExtractLength());
     }
 
     private static IndexingRule getRule(IndexDefinition defn, String typeName){

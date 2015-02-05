@@ -85,6 +85,7 @@ public class LuceneOakRepositoryStub extends OakTarMKRepositoryStub {
                         .setProperty(REINDEX_PROPERTY_NAME, true)
                         .setProperty(LuceneIndexConstants.TEST_MODE, true)
                         .setProperty(LuceneIndexConstants.EVALUATE_PATH_RESTRICTION, true)
+                        .setProperty(LuceneIndexConstants.SUGGEST_UPDATE_FREQUENCY_MINUTES, 0) // always update suggester
                         .setProperty(LuceneIndexConstants.COMPAT_MODE, IndexFormatVersion.V2.getVersion());
 
                 NodeBuilder props = index.child(LuceneIndexConstants.INDEX_RULES)
@@ -100,6 +101,8 @@ public class LuceneOakRepositoryStub extends OakTarMKRepositoryStub {
                     .setProperty(LuceneIndexConstants.PROP_NODE_SCOPE_INDEX, true)
                     .setProperty(LuceneIndexConstants.PROP_USE_IN_EXCERPT, true)
                     .setProperty(LuceneIndexConstants.PROP_PROPERTY_INDEX, true)
+                    .setProperty(LuceneIndexConstants.PROP_USE_IN_SPELLCHECK, true)
+                    .setProperty(LuceneIndexConstants.PROP_USE_IN_SUGGEST, true)
                     .setProperty(LuceneIndexConstants.PROP_NAME, LuceneIndexConstants.REGEX_ALL_PROPS)
                     .setProperty(LuceneIndexConstants.PROP_IS_REGEX, true);
         }

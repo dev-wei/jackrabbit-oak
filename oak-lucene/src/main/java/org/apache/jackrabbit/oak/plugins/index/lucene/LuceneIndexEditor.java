@@ -176,7 +176,7 @@ public class LuceneIndexEditor implements IndexEditor, Aggregate.AggregateRoot {
             if (addOrUpdate(path, after, before.exists())) {
                 long indexed = context.incIndexedNodes();
                 if (indexed % 1000 == 0) {
-                    log.debug("Indexed {} nodes...", indexed);
+                    log.debug("{} => Indexed {} nodes...", context.getDefinition().getIndexName(), indexed);
                 }
             }
         }
@@ -193,7 +193,7 @@ public class LuceneIndexEditor implements IndexEditor, Aggregate.AggregateRoot {
                         "Failed to close the Lucene index", e);
             }
             if (context.getIndexedNodes() > 0) {
-                log.debug("Indexed {} nodes, done.", context.getIndexedNodes());
+                log.debug("{} => Indexed {} nodes, done.", context.getDefinition().getIndexName(), context.getIndexedNodes());
             }
         }
     }
@@ -329,8 +329,21 @@ public class LuceneIndexEditor implements IndexEditor, Aggregate.AggregateRoot {
             document.add(newDepthField(path));
         }
 
+        // because of LUCENE-5833 we have to merge the suggest fields into a single one
+        Field suggestField = null;
         for (Field f : fields) {
-            document.add(f);
+            if (FieldNames.SUGGEST.endsWith(f.name())) {
+                if (suggestField == null) {
+                    suggestField = f;
+                } else {
+                    suggestField = FieldFactory.newSuggestField(suggestField.stringValue(), f.stringValue());
+                }
+            } else {
+                document.add(f);
+            }
+        }
+        if (suggestField != null) {
+            document.add(suggestField);
         }
 
         //TODO Boost at document level
@@ -363,6 +376,14 @@ public class LuceneIndexEditor implements IndexEditor, Aggregate.AggregateRoot {
                     if (pd.analyzed && pd.includePropertyType(property.getType().tag())) {
                         String analyzedPropName = constructAnalyzedPropertyName(pname);
                         fields.add(newPropertyField(analyzedPropName, value, !pd.skipTokenization(pname), pd.stored));
+                    }
+
+                    if (pd.useInSuggest) {
+                        fields.add(newPropertyField(FieldNames.SUGGEST, value, true, false));
+                    }
+
+                    if (pd.useInSpellcheck) {
+                        fields.add(newPropertyField(FieldNames.SPELLCHECK, value, true, false));
                     }
 
                     if (pd.nodeScopeIndex) {
@@ -676,7 +697,7 @@ public class LuceneIndexEditor implements IndexEditor, Aggregate.AggregateRoot {
     }
 
     private String parseStringValue(Blob v, Metadata metadata, String path) {
-        WriteOutContentHandler handler = new WriteOutContentHandler();
+        WriteOutContentHandler handler = new WriteOutContentHandler(context.getDefinition().getMaxExtractLength());
         try {
             InputStream stream = v.getNewStream();
             try {
