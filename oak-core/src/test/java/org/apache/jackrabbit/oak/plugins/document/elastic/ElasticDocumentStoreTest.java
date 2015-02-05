@@ -1,6 +1,9 @@
 package org.apache.jackrabbit.oak.plugins.document.elastic;
 
 import org.apache.jackrabbit.oak.Oak;
+import org.apache.jackrabbit.oak.commons.json.JsonObject;
+import org.apache.jackrabbit.oak.commons.json.JsopBuilder;
+import org.apache.jackrabbit.oak.commons.json.JsopTokenizer;
 import org.apache.jackrabbit.oak.plugins.document.DocumentMK;
 import org.apache.jackrabbit.oak.plugins.document.DocumentNodeStore;
 import org.apache.jackrabbit.oak.plugins.observation.filter.FilterBuilder;
@@ -23,16 +26,16 @@ import org.osgi.service.repository.Repository;
 public class ElasticDocumentStoreTest {
   private Client client;
 
-//  @Before
-//  public void prepareClient() {
-//    Node node = NodeBuilder.nodeBuilder().node();
-//    client = node.client();
-//  }
-//
-//  @After
-//  public void closeClient() {
-//    client.close();
-//  }
+  @Before
+  public void prepareClient() {
+    Node node = NodeBuilder.nodeBuilder().node();
+    client = node.client();
+  }
+
+  @After
+  public void closeClient() {
+    client.close();
+  }
 
   @Test
   public void getVersionTest() throws Exception {
@@ -47,11 +50,11 @@ public class ElasticDocumentStoreTest {
 
   @Test
   public void get() throws Exception {
-//    Object movie = new GetRequestBuilder(client, "movies")
-//        .setPreference("github")
-//        .setId("1")
-//        .execute()
-//        .actionGet();
+    Object movie = new GetRequestBuilder(client, "movies")
+        .setPreference("_primary")
+        .setId("1")
+        .execute()
+        .actionGet();
   }
 
   @Test
@@ -65,6 +68,21 @@ public class ElasticDocumentStoreTest {
 //        ))
 //        .execute()
 //        .actionGet();
+  }
+
+  @Test
+  public void json(){
+    try {
+      JsopTokenizer t = new JsopTokenizer("{ \"r14b514b3233-0-1\" : \"c\",\"adsf\": { \"aaa\" : \"dsfdsf\"}}");
+      t.read('{');
+      JsonObject o = JsonObject.create(t);
+
+      JsopBuilder w = new JsopBuilder();
+      o.toJson(w);
+      String a = w.toString();
+    } catch (Exception exp){
+      exp.printStackTrace();
+    }
   }
 
 }

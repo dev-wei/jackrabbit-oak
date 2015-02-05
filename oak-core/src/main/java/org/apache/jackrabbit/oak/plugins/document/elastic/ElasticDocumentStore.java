@@ -8,6 +8,8 @@ import com.google.common.util.concurrent.Striped;
 import com.google.common.util.concurrent.UncheckedExecutionException;
 import org.apache.jackrabbit.oak.cache.CacheStats;
 import org.apache.jackrabbit.oak.cache.CacheValue;
+import org.apache.jackrabbit.oak.commons.json.JsonObject;
+import org.apache.jackrabbit.oak.commons.json.JsopTokenizer;
 import org.apache.jackrabbit.oak.plugins.document.Collection;
 import org.apache.jackrabbit.oak.plugins.document.*;
 import org.apache.jackrabbit.oak.plugins.document.cache.CachingDocumentStore;
@@ -60,6 +62,8 @@ import static org.elasticsearch.common.xcontent.XContentFactory.jsonBuilder;
 public class ElasticDocumentStore implements CachingDocumentStore {
 
   private static final String ID = "id";
+
+  private static final String REVISIONS = "_revisions";
 
   private static final Logger LOG = LoggerFactory.getLogger(ElasticDocumentStore.class);
 
@@ -531,14 +535,29 @@ public class ElasticDocumentStore implements CachingDocumentStore {
 
   @CheckForNull
   protected <T extends Document> T convertFromMap(@Nonnull final Collection<T> collection,
-                                                  @Nullable final Map<String, Object> responseMap) {
+                                                  @Nullable final Map<String, Object> sourceMap) {
     T copy = null;
-    if (responseMap != null) {
+    if (sourceMap != null) {
       copy = collection.newDocument(this);
-      for (String key : responseMap.keySet()) {
-        Object o = responseMap.get(key);
+      for (String key : sourceMap.keySet()) {
+        Object o = sourceMap.get(key);
         if (o instanceof String) {
-          copy.put(key, o);
+          try {
+            JsopTokenizer t = new JsopTokenizer(o.toString());
+            t.read('{');
+            JsonObject json = JsonObject.create(t);
+            Map<String, Object> props = new TreeMap<String, Object>();
+            props.putAll(json.getProperties());
+            props.putAll(json.getChildren());
+
+            if (key == REVISIONS) {
+              copy.put(key, convertFromMap(props));
+            } else {
+              copy.put(key, props);
+            }
+          } catch (IllegalArgumentException exp) {
+            copy.put(key, o);
+          }
         } else if (o instanceof Long) {
           copy.put(key, o);
         } else if (o instanceof Integer) {
@@ -553,6 +572,15 @@ public class ElasticDocumentStore implements CachingDocumentStore {
       }
     }
     return copy;
+  }
+
+  @Nonnull
+  private Map<Revision, Object> convertFromMap(@Nonnull final Map<String, Object> sourceMap) {
+    Map<Revision, Object> map = new TreeMap<Revision, Object>(comparator);
+    for (Map.Entry<String, Object> entry : sourceMap.entrySet()) {
+      map.put(Revision.fromString(entry.getKey()), entry.getValue());
+    }
+    return map;
   }
 
   @CheckForNull
