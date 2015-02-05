@@ -210,11 +210,16 @@ public class XPathToSQL2Converter {
                         Expression.Property p = new Expression.Property(currentSelector, "rep:excerpt", false);
                         statement.addSelectColumn(p);
                     } else if (readIf("rep:spellcheck")) {
-                        readExcerpt();
+                        // only rep:spellcheck() is currently supported
+                        read("(");
+                        read(")");                        
                         Expression.Property p = new Expression.Property(currentSelector, "rep:spellcheck()", false);
                         statement.addSelectColumn(p);
+                    } else if (readIf("rep:suggest")) {
+                        readExcerpt();
+                        Expression.Property p = new Expression.Property(currentSelector, "rep:suggest()", false);
+                        statement.addSelectColumn(p);
                     }
-
                 } while (readIf("|"));
                 read(")");
             } else if (currentTokenType == IDENTIFIER) {
@@ -630,9 +635,13 @@ public class XPathToSQL2Converter {
             Expression term = parseExpression();
             read(")");
             return new Expression.Spellcheck(term);
+        } else if ("rep:suggest".equals(functionName)) {
+            Expression term = parseExpression();
+            read(")");
+            return new Expression.Suggest(term);
         } else {
             throw getSyntaxError("jcr:like | jcr:contains | jcr:score | xs:dateTime | " + 
-                    "fn:lower-case | fn:upper-case | fn:name | rep:similar | rep:spellcheck");
+                    "fn:lower-case | fn:upper-case | fn:name | rep:similar | rep:spellcheck | rep:suggest");
         }
     }
 

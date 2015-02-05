@@ -57,6 +57,7 @@ import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.util.TreeUtil;
 import org.apache.lucene.analysis.Analyzer;
+import org.apache.lucene.analysis.miscellaneous.LimitTokenCountAnalyzer;
 import org.apache.lucene.analysis.miscellaneous.PerFieldAnalyzerWrapper;
 import org.apache.lucene.analysis.path.PathHierarchyTokenizerFactory;
 import org.apache.lucene.codecs.Codec;
@@ -88,6 +89,7 @@ import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstant
 import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.ORDERED_PROP_NAMES;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.PROP_NAME;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.PROP_NODE;
+import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.TIKA;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.TIKA_CONFIG;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.PropertyDefinition.DEFAULT_BOOST;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.util.ConfigUtil.getOptionalValue;
@@ -113,6 +115,13 @@ class IndexDefinition implements Aggregate.AggregateMapper{
      * Default entry count to keep estimated entry count low.
      */
     static final long DEFAULT_ENTRY_COUNT = 1000;
+
+    /**
+     * Default value for property {@link #maxFieldLength}.
+     */
+    public static final int DEFAULT_MAX_FIELD_LENGTH = 10000;
+
+    static final int DEFAULT_MAX_EXTRACT_LENGTH = -10;
 
     /**
      * System managed hidden property to record the current index version
@@ -180,6 +189,12 @@ class IndexDefinition implements Aggregate.AggregateMapper{
 
     private final boolean hasCustomTikaConfig;
 
+    private final int maxFieldLength;
+
+    private final int maxExtractLength;
+
+    private final int suggesterUpdateFrequencyMinutes;
+
     public IndexDefinition(NodeState root, NodeState defn) {
         this(root, defn, null);
     }
@@ -230,12 +245,15 @@ class IndexDefinition implements Aggregate.AggregateMapper{
             this.entryCount = DEFAULT_ENTRY_COUNT;
         }
 
+        this.maxFieldLength = getOptionalValue(defn, LuceneIndexConstants.MAX_FIELD_LENGTH, DEFAULT_MAX_FIELD_LENGTH);
         this.costPerEntry = getOptionalValue(defn, LuceneIndexConstants.COST_PER_ENTRY, 1.0);
         this.costPerExecution = getOptionalValue(defn, LuceneIndexConstants.COST_PER_EXECUTION, 1.0);
         this.indexesAllTypes = areAllTypesIndexed();
         this.analyzers = collectAnalyzers(defn);
         this.analyzer = createAnalyzer();
-        this.hasCustomTikaConfig = defn.getChildNode(TIKA_CONFIG).exists();
+        this.hasCustomTikaConfig = getTikaConfigNode().exists();
+        this.maxExtractLength = determineMaxExtractLength();
+        this.suggesterUpdateFrequencyMinutes = getOptionalValue(defn, LuceneIndexConstants.SUGGEST_UPDATE_FREQUENCY_MINUTES, 60);
     }
 
     public boolean isFullTextEnabled() {
@@ -271,6 +289,10 @@ class IndexDefinition implements Aggregate.AggregateMapper{
 
     public long getEntryCount() {
         return entryCount;
+    }
+
+    public int getSuggesterUpdateFrequencyMinutes() {
+        return suggesterUpdateFrequencyMinutes;
     }
 
     public boolean isEntryCountDefined() {
@@ -321,29 +343,45 @@ class IndexDefinition implements Aggregate.AggregateMapper{
     }
 
     public InputStream getTikaConfig(){
-        return ConfigUtil.getBlob(definition.getChildNode(TIKA_CONFIG), TIKA_CONFIG).getNewStream();
+        return ConfigUtil.getBlob(getTikaConfigNode(), TIKA_CONFIG).getNewStream();
+    }
+
+    public String getIndexName() {
+        return indexName;
+    }
+
+    public int getMaxExtractLength() {
+        return maxExtractLength;
     }
 
     @Override
     public String toString() {
-        return "IndexDefinition : " + indexName;
+        return "Lucene Index : " + indexName;
     }
 
     //~---------------------------------------------------< Analyzer >
 
     private Analyzer createAnalyzer() {
+        Analyzer result;
         Analyzer defaultAnalyzer = LuceneIndexConstants.ANALYZER;
         if (analyzers.containsKey(LuceneIndexConstants.ANL_DEFAULT)){
             defaultAnalyzer = analyzers.get(LuceneIndexConstants.ANL_DEFAULT);
         }
         if (!evaluatePathRestrictions()){
-            return defaultAnalyzer;
+            result = defaultAnalyzer;
+        } else {
+            Map<String, Analyzer> analyzerMap = ImmutableMap.<String, Analyzer>builder()
+                    .put(FieldNames.ANCESTORS,
+                            new TokenizerChain(new PathHierarchyTokenizerFactory(Collections.<String, String>emptyMap())))
+                    .build();
+            result = new PerFieldAnalyzerWrapper(defaultAnalyzer, analyzerMap);
         }
-        Map<String, Analyzer> analyzerMap = ImmutableMap.<String, Analyzer>builder()
-                .put(FieldNames.ANCESTORS,
-                        new TokenizerChain(new PathHierarchyTokenizerFactory(Collections.<String, String>emptyMap())))
-                .build();
-        return new PerFieldAnalyzerWrapper(defaultAnalyzer, analyzerMap);
+
+        //In case of negative value no limits would be applied
+        if (maxFieldLength < 0){
+            return result;
+        }
+        return new LimitTokenCountAnalyzer(result, maxFieldLength);
     }
 
     private static Map<String, Analyzer> collectAnalyzers(NodeState defn) {
@@ -981,6 +1019,19 @@ class IndexDefinition implements Aggregate.AggregateMapper{
     }
 
     //~---------------------------------------------< utility >
+
+    private int determineMaxExtractLength() {
+        int length = getOptionalValue(definition.getChildNode(TIKA), LuceneIndexConstants.TIKA_MAX_EXTRACT_LENGTH,
+                DEFAULT_MAX_EXTRACT_LENGTH);
+        if (length < 0){
+            return - length * maxFieldLength;
+        }
+        return length;
+    }
+
+    private NodeState getTikaConfigNode() {
+        return definition.getChildNode(TIKA).getChildNode(TIKA_CONFIG);
+    }
 
     private Codec createCodec() {
         String codecName = getOptionalValue(definition, LuceneIndexConstants.CODEC_NAME, null);
