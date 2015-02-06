@@ -526,8 +526,7 @@ public class DocumentMK implements MicroKernel {
         public Builder setElastic(){
           if(this.documentStore == null){
             Node node = NodeBuilder.nodeBuilder().node();
-
-            this.documentStore = new ElasticDocumentStore(node.client(), this);
+            this.documentStore = new ElasticDocumentStore(node, this);
           }
           return this;
         }
