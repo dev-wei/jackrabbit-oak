@@ -61,6 +61,10 @@ class FilterQueryParser {
         Collection<Filter.PropertyRestriction> propertyRestrictions = filter.getPropertyRestrictions();
         if (propertyRestrictions != null && !propertyRestrictions.isEmpty()) {
             for (Filter.PropertyRestriction pr : propertyRestrictions) {
+                if (pr.isNullRestriction()) {
+                    // can not use full "x is null"
+                    continue;
+                }
                 // native query support
                 if (SolrQueryIndex.NATIVE_SOLR_QUERY.equals(pr.propertyName) || SolrQueryIndex.NATIVE_LUCENE_QUERY.equals(pr.propertyName)) {
                     String nativeQueryString = String.valueOf(pr.first.getValue(pr.first.getType()));
@@ -108,18 +112,12 @@ class FilterQueryParser {
                                         kv[0] = "spellcheck.q";
                                     }
                                     solrQuery.setParam("spellcheck", true);
-
-                                    // TODO : this should not be always passed to avoid building the dictionary on each spellcheck request
-                                    solrQuery.setParam("spellcheck.build", true);
                                 }
                                 if ("/suggest".equals(requestHandlerString)) {
                                     if ("term".equals(kv[0])) {
                                         kv[0] = "suggest.q";
                                     }
                                     solrQuery.setParam("suggest", true);
-
-                                    // TODO : this should not be always passed to avoid building the dictionary on each suggest request
-                                    solrQuery.setParam("suggest.build", true);
                                 }
                                 solrQuery.setParam(kv[0], kv[1]);
                             }
